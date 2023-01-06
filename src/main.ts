@@ -1,6 +1,8 @@
-import * as ts from 'typescript';
-import * as fs from 'fs';
-import { VisitorBase, Visit } from './visitor-base';
+import * as ts from "typescript";
+import * as fs from "fs";
+
+import { VisitorBase, Visit } from "./visitor-base";
+import { toJsonSerializableType } from "./simple-type";
 
 function assert(expr: unknown, msg = "") {
     if (!expr) {
@@ -17,42 +19,46 @@ function assertEquals<T>(actual: T, expected: T, msg?: string) {
 function compileSource(path: string) {
     let options: ts.CompilerOptions = {
         ...ts.getDefaultCompilerOptions(),
-        ...<ts.CompilerOptions>{
+        ...(<ts.CompilerOptions>{
             target: ts.ScriptTarget.ES2022,
             module: ts.ModuleKind.CommonJS,
             moduleResolution: ts.ModuleResolutionKind.NodeJs,
             experimentalDecorators: true,
-            lib: ['lib.es2022.d.ts'],
+            lib: ["lib.es2022.d.ts"],
             noLib: false,
             emitDecoratorMetadata: false,
             suppressOutputPathCheck: true,
-        }
+        }),
     };
 
-    const sourceFileText = fs.readFileSync(path, 'utf8');
+    const sourceFileText = fs.readFileSync(path, "utf8");
     let inputs: Record<string, ts.SourceFile> = {
-        [path]: ts.createSourceFile(path, sourceFileText, options.target!)
+        [path]: ts.createSourceFile(path, sourceFileText, options.target!),
     };
 
     const program = ts.createProgram(Object.keys(inputs), options);
     return program.emit(undefined, undefined, undefined, undefined, {
-        before: [transformer(program)]
-    })
+        before: [transformer(program)],
+    });
 }
 
 type TransformationContext = {
-    ctx: ts.TransformationContext,
-    tc: ts.TypeChecker
-}
+    ctx: ts.TransformationContext;
+    tc: ts.TypeChecker;
+};
 
-const transformer: (program: ts.Program) => ts.TransformerFactory<ts.SourceFile> = (program: ts.Program) => {
-    const tc = program.getTypeChecker()
+const transformer: (program: ts.Program) => ts.TransformerFactory<ts.SourceFile> = (
+    program: ts.Program
+) => {
+    const tc = program.getTypeChecker();
 
-    const routingTransformer: ts.TransformerFactory<ts.SourceFile> = (context: ts.TransformationContext) => {
-        return sourceFile => {
+    const routingTransformer: ts.TransformerFactory<ts.SourceFile> = (
+        context: ts.TransformationContext
+    ) => {
+        return (sourceFile) => {
             return RoutingTransformer.transform(sourceFile, {
                 ctx: context,
-                tc
+                tc,
             });
         };
     };
@@ -63,13 +69,16 @@ const transformer: (program: ts.Program) => ts.TransformerFactory<ts.SourceFile>
 export class RoutingTransformer extends VisitorBase {
     private tc: ts.TypeChecker;
 
-    constructor(private readonly ctx: TransformationContext, private readonly routeMethod: ts.Symbol) {
-        super(ctx.ctx)
-        this.tc = ctx.tc
+    constructor(
+        private readonly ctx: TransformationContext,
+        private readonly routeMethod: ts.Symbol
+    ) {
+        super(ctx.ctx);
+        this.tc = ctx.tc;
     }
 
     static transform<T extends ts.Node>(node: T, context: TransformationContext) {
-        const routeMethod = RoutingTransformer.findRouteMethod(context.tc, node)
+        const routeMethod = RoutingTransformer.findRouteMethod(context.tc, node);
         let transformer = new RoutingTransformer(context, routeMethod);
         return transformer.visitNode(node);
     }
@@ -90,7 +99,10 @@ export class RoutingTransformer extends VisitorBase {
     }
 
     private static findRouteMethod(tc: ts.TypeChecker, rootNode: ts.Node): ts.Symbol {
-        const exportAssignments = this.getMatchingNodes(rootNode, [ts.SyntaxKind.SyntaxList, ts.SyntaxKind.ExportAssignment]);
+        const exportAssignments = this.getMatchingNodes(rootNode, [
+            ts.SyntaxKind.SyntaxList,
+            ts.SyntaxKind.ExportAssignment,
+        ]);
         assertEquals(exportAssignments.length, 1, "Found unexpected number of exports");
 
         const expChildren = exportAssignments[0].getChildren();
@@ -108,13 +120,20 @@ export class RoutingTransformer extends VisitorBase {
 
         const exportedType = tc.getTypeAtLocation(exportedVariable!);
         const exportedTypeName = exportedType.symbol.getName();
-        assertEquals(exportedTypeName, "RouteMap", `Exported variable must be of type RouteMap, but got type '${exportedTypeName}'`)
+        assertEquals(
+            exportedTypeName,
+            "RouteMap",
+            `Exported variable must be of type RouteMap, but got type '${exportedTypeName}'`
+        );
         assert(exportedType.isClass(), "Exported RouteMap should be a class but isn't");
 
         const routeMethod = tc.getPropertyOfType(exportedType, "route");
-        assert(routeMethod !== undefined, "Default-exported RouteMap type doesn't have route method");
+        assert(
+            routeMethod !== undefined,
+            "Default-exported RouteMap type doesn't have route method"
+        );
 
-        return routeMethod!
+        return routeMethod!;
     }
 
     private analyzeRouteTypeArguments(callExpr: ts.CallExpression) {
@@ -125,11 +144,31 @@ export class RoutingTransformer extends VisitorBase {
             const arrowFunction = handlerArg as ts.ArrowFunction;
             const functionType = this.tc.getTypeAtLocation(arrowFunction);
             const callSignatures = functionType.getCallSignatures();
-            console.log(functionType);
 
-            assertEquals(callSignatures.length, 1, "Unexpected number of call signatures of Handler passed to RouteMap.route");
+            assertEquals(
+                callSignatures.length,
+                1,
+                "Unexpected number of call signatures of Handler passed to RouteMap.route"
+            );
             const callSignature = callSignatures[0];
-            console.log(this.tc.getReturnTypeOfSignature(callSignature));
+            const returnType = this.tc.getReturnTypeOfSignature(callSignature);
+            const simplifiedReturnType = toJsonSerializableType(this.tc, returnType);
+            console.log(simplifiedReturnType);
+
+            const params = callSignature.parameters;
+            assertEquals(
+                params.length,
+                1,
+                "Unexpected number of call parameters of Handler passed to RouteMap.route"
+            );
+            const queryParams = params[0].valueDeclaration;
+            assert(queryParams !== undefined, "QueryParams argument is missing a declaration");
+            const queryParamsType = this.tc.getTypeAtLocation(queryParams!);
+            // toSimpleType(queryParamsType);
+
+            assertEquals(queryParamsType.flags, ts.TypeFlags.Object);
+            const paramsObj = queryParamsType as ts.ObjectType;
+            paramsObj.getProperties();
         } else {
             // TODO
             assert(false);
@@ -147,7 +186,12 @@ export class RoutingTransformer extends VisitorBase {
                 this.analyzeRouteTypeArguments(callExpr);
                 const args = Array.from(callExpr.arguments);
                 args.push(ts.factory.createStringLiteral("OmgWtfLol"));
-                return ts.factory.updateCallExpression(this.visitEachChild(callExpr), callExpr.expression, callExpr.typeArguments, args);
+                return ts.factory.updateCallExpression(
+                    this.visitEachChild(callExpr),
+                    callExpr.expression,
+                    callExpr.typeArguments,
+                    args
+                );
             }
         } else if (expr.kind == ts.SyntaxKind.Identifier) {
             const callIdent = expr as ts.Identifier;
@@ -158,7 +202,6 @@ export class RoutingTransformer extends VisitorBase {
             return this.visitEachChild(callExpr);
         }
     }
-
 }
 
 compileSource("./examples/simple_endpoint.ts");

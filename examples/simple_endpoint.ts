@@ -6,9 +6,8 @@ export type Route<QueryParams, ResponseType> = {
 
 /** A request handler that maps HTTP request to an HTTP response. */
 export type Handler<QueryParams, ResponseType> = (
-    query: QueryParams,
+    query: QueryParams
 ) => ResponseType | Promise<ResponseType>;
-
 
 export class RouteMap {
     routes: Route<unknown, unknown>[];
@@ -36,28 +35,31 @@ export class RouteMap {
     }
 }
 
-
 const routeMap = new RouteMap();
 const aliasedRouteMap = routeMap;
 
 type PeopleQuery = {
-    maxAge?: number,
-    firstName?: string
-}
+    maxAge?: number;
+    firstName?: string;
+};
 
 type Person = {
-    firstName: string,
-    lastName: string,
-    age: number
-}
+    firstName: string;
+    lastName: string;
+    age: number;
+    birthDate: Date;
+    favoriteColors: string[];
+};
 
 aliasedRouteMap.route("GET", "/people", (q: PeopleQuery) => {
     return {
         firstName: "Jan",
         lastName: "Nejedly",
-        age: 100
+        age: 100,
+        birthDate: new Date(),
+        favoriteColors: ["Bagr", "Trol", "LoL"],
     };
-})
+});
 
 const bagr = routeMap.route;
 
@@ -65,8 +67,9 @@ bagr<PeopleQuery, Person>("GET", "/people", (q: PeopleQuery) => {
     return {
         firstName: "Martin",
         lastName: "Novy",
-        age: 77
+        age: 77,
+        birthDate: new Date(),
     };
-})
+});
 
 export default routeMap;
