@@ -2,19 +2,8 @@ import * as ts from "typescript";
 import * as fs from "fs";
 
 import { VisitorBase, Visit } from "./visitor-base";
-import { toJsonSerializableType } from "./simple-type";
-
-function assert(expr: unknown, msg = "") {
-    if (!expr) {
-        throw new Error(msg);
-    }
-}
-
-function assertEquals<T>(actual: T, expected: T, msg?: string) {
-    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-        throw new Error(msg ?? `actual (${actual}) != expected (${expected})`);
-    }
-}
+import { JsonSerializable, typeToJsonSerializable } from "./serializable-type";
+import { assert, assertEquals } from "./utils";
 
 function compileSource(path: string) {
     let options: ts.CompilerOptions = {
@@ -39,6 +28,7 @@ function compileSource(path: string) {
     const program = ts.createProgram(Object.keys(inputs), options);
     return program.emit(undefined, undefined, undefined, undefined, {
         before: [transformer(program)],
+        after: [readerTrans(program)],
     });
 }
 
@@ -55,7 +45,7 @@ const transformer: (program: ts.Program) => ts.TransformerFactory<ts.SourceFile>
     const routingTransformer: ts.TransformerFactory<ts.SourceFile> = (
         context: ts.TransformationContext
     ) => {
-        return (sourceFile) => {
+        return (sourceFile: ts.SourceFile) => {
             return RoutingTransformer.transform(sourceFile, {
                 ctx: context,
                 tc,
@@ -66,15 +56,29 @@ const transformer: (program: ts.Program) => ts.TransformerFactory<ts.SourceFile>
     return routingTransformer;
 };
 
+const readerTrans: (program: ts.Program) => ts.TransformerFactory<ts.SourceFile> = (
+    program: ts.Program
+) => {
+    const readerTransformer: ts.TransformerFactory<ts.SourceFile> = (
+        context: ts.TransformationContext
+    ) => {
+        return (sourceFile: ts.SourceFile) => {
+            console.log(sourceFile.text);
+            return sourceFile;
+        };
+    };
+
+    return readerTransformer;
+};
+
 export class RoutingTransformer extends VisitorBase {
     private tc: ts.TypeChecker;
+    private usedTypes: Map<number, JsonSerializable>;
 
-    constructor(
-        private readonly ctx: TransformationContext,
-        private readonly routeMethod: ts.Symbol
-    ) {
+    constructor(private readonly ctx: TransformationContext, private readonly routeMethod: ts.Symbol) {
         super(ctx.ctx);
         this.tc = ctx.tc;
+        this.usedTypes = new Map();
     }
 
     static transform<T extends ts.Node>(node: T, context: TransformationContext) {
@@ -128,10 +132,7 @@ export class RoutingTransformer extends VisitorBase {
         assert(exportedType.isClass(), "Exported RouteMap should be a class but isn't");
 
         const routeMethod = tc.getPropertyOfType(exportedType, "route");
-        assert(
-            routeMethod !== undefined,
-            "Default-exported RouteMap type doesn't have route method"
-        );
+        assert(routeMethod !== undefined, "Default-exported RouteMap type doesn't have route method");
 
         return routeMethod!;
     }
@@ -152,7 +153,7 @@ export class RoutingTransformer extends VisitorBase {
             );
             const callSignature = callSignatures[0];
             const returnType = this.tc.getReturnTypeOfSignature(callSignature);
-            const simplifiedReturnType = toJsonSerializableType(this.tc, returnType);
+            const simplifiedReturnType = typeToJsonSerializable(this.tc, returnType);
             console.log(simplifiedReturnType);
 
             const params = callSignature.parameters;
@@ -164,15 +165,22 @@ export class RoutingTransformer extends VisitorBase {
             const queryParams = params[0].valueDeclaration;
             assert(queryParams !== undefined, "QueryParams argument is missing a declaration");
             const queryParamsType = this.tc.getTypeAtLocation(queryParams!);
-            // toSimpleType(queryParamsType);
-
-            assertEquals(queryParamsType.flags, ts.TypeFlags.Object);
-            const paramsObj = queryParamsType as ts.ObjectType;
-            paramsObj.getProperties();
+            const queryParamsSimplified = typeToJsonSerializable(this.tc, queryParamsType);
+            console.log(queryParamsSimplified);
+            return {
+                paramsTypeId: this.registerUsedType(queryParamsSimplified),
+                returnTypeId: this.registerUsedType(simplifiedReturnType),
+            };
         } else {
             // TODO
-            assert(false);
+            throw new Error("Not implemented");
         }
+    }
+
+    private registerUsedType(type: JsonSerializable): number {
+        const typeId = this.usedTypes.size;
+        this.usedTypes.set(typeId, type);
+        return typeId;
     }
 
     @Visit(ts.SyntaxKind.CallExpression)
@@ -183,9 +191,24 @@ export class RoutingTransformer extends VisitorBase {
             const propertyAccessSymbol = this.tc.getSymbolAtLocation(propertyAccess);
             // TODO: This is very inefficient.
             if (propertyAccessSymbol === this.routeMethod) {
-                this.analyzeRouteTypeArguments(callExpr);
+                const { paramsTypeId, returnTypeId } = this.analyzeRouteTypeArguments(callExpr);
+                const metaInfo = ts.factory.createObjectLiteralExpression([
+                    ts.factory.createPropertyAssignment(
+                        ts.factory.createComputedPropertyName(
+                            ts.factory.createStringLiteral("paramsTypeId")
+                        ),
+                        ts.factory.createNumericLiteral(paramsTypeId)
+                    ),
+                    ts.factory.createPropertyAssignment(
+                        ts.factory.createComputedPropertyName(
+                            ts.factory.createStringLiteral("returnTypeId")
+                        ),
+                        ts.factory.createNumericLiteral(returnTypeId)
+                    ),
+                ]);
+
                 const args = Array.from(callExpr.arguments);
-                args.push(ts.factory.createStringLiteral("OmgWtfLol"));
+                args.push(metaInfo);
                 return ts.factory.updateCallExpression(
                     this.visitEachChild(callExpr),
                     callExpr.expression,
